@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os/signal"
+	"syscall"
+	"time"
 	"context"
 	"os/exec"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"github.com/howeyc/fsnotify"
 	"os"
 	"sync/atomic"
+
 	//"os/exec"
 )
 
@@ -36,7 +40,7 @@ func main() {
 	}
 
 	ctx,cancelFunc := context.WithCancel(context.Background())
-	done := make(chan bool)
+	done := make(chan os.Signal,1)
 	restartChan := make(chan interface{})
 
 	startRestartWatchDog(restartChan,context.WithValue(ctx,"cmd",cmds))
@@ -47,78 +51,67 @@ func main() {
 		for {
 			select {
 			case ev := <-watcher.Event:
-				restarting := restarting.Load().(bool)
-				if(!restarting){
+				onrestarting := restarting.Load().(bool)
+				if(!onrestarting){
 					d("event: %v", ev)
+					restarting.Store(true)
 					restartChan <- 1
 				}
 				
-			case err := <-watcher.Error:
-				d("error: %v", err)
+			case <-watcher.Error:
+				//d("error: %v", err)
 			}
 		}
 	}()
 
-	err = watcher.Watch(wd)
-	if err != nil {
-		panic(err)
-	}
-
-	watchSubDirs(watcher,wd)
 	
-	// Hang so program doesn't exit
-	<-done
 
+	watchSourceFiles(watcher,wd)
+	
+	signal.Notify(done,os.Interrupt,os.Kill)
+	<- done
+	d("signal revieve ")
 	/* ... do stuff ... */
 	watcher.Close()
 	cancelFunc()
-
+	<- restartChan	
 }
 
-func doRestart(cmd ...string) (*os.Process,error) {
+func doRestart(cmd ...string) (*exec.Cmd,error) {
 	cm := exec.Command("go",cmd...)
 	d("restart ")
 	cm.Stdout = os.Stdout
 	cm.Stdin = os.Stdin
 	cm.Stderr = os.Stderr
+	cm.SysProcAttr = &syscall.SysProcAttr{Setpgid:true}
 	err := cm.Start()
 	if err != nil {
 		d("restart fail! %s",err)
 		return nil,err
 	}
-	go func(){
-		cm.Wait()
-	}()
-	return cm.Process,nil	
+	return cm,nil	
 }
 
-func startRestartWatchDog(restart <-chan interface{},ctx context.Context){
+func startRestartWatchDog(restart chan interface{},ctx context.Context){
 	go func() {
-		var runningProcess *os.Process
+		var cmd *exec.Cmd
 		for {
 			select{
 				case <-restart:
-					restarting.Store(true)
-					if runningProcess != nil {
-						err := runningProcess.Kill()
-						if err != nil {
-							d("kill fail %s",err)
-						}
-						runningProcess.Release()
-						runningProcess.Wait()
-					}
-					p,err := doRestart(ctx.Value("cmd").([]string)...)
+					killProcess(cmd)
+					c,err := doRestart(ctx.Value("cmd").([]string)...)
 					if err == nil {
-						d("running pid %d",p.Pid)
-						runningProcess = p
+						d("running pid %d",c.Process.Pid)
+						cmd = c
 					}else{
-						runningProcess = nil
+						cmd = nil
 					}
+					<- time.After(5 * time.Second)
 					restarting.Store(false)
 				case <-ctx.Done():
-					if runningProcess != nil {
-						runningProcess.Kill()
-					}
+					d("watchdog exit")
+					killProcess(cmd)
+					close(restart)
 					return
 			}
 
@@ -126,15 +119,30 @@ func startRestartWatchDog(restart <-chan interface{},ctx context.Context){
 	}()
 }
 
-func watchSubDirs(watcher *fsnotify.Watcher,root string){
+func killProcess(cmd *exec.Cmd){
+	if cmd != nil {
+		pgid,err := syscall.Getpgid(cmd.Process.Pid)
+		if err != nil {
+			d("Get pgid err %s",err)
+		}
+		if err = syscall.Kill(-pgid,syscall.SIGKILL);err != nil{
+			d("kill err %s" ,err)
+		}
+		<- time.After(2 * time.Second)
+	}
+}
+
+func watchSourceFiles(watcher *fsnotify.Watcher,root string){
 	filepath.Walk(root,func(path string, info os.FileInfo, err error) error{
 		if err != nil {
 			d("error occur on dir %s cause %s",path,err)
 			return err
 		}
+
 		
-		if info.IsDir() {
-			//d("watching %s",path)
+		if !info.IsDir() && filepath.Ext(path) == ".go" {
+			
+			d("watching %s",path)
 			err := watcher.Watch(path)
 			if err != nil {
 				return err
