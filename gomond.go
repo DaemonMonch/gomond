@@ -145,6 +145,7 @@ func start(buildName string) error{
 	go func(){
 		cmd.Wait()
 		runningChan <- 1
+		cmd = nil
 	}()
 	return err	
 }
@@ -153,7 +154,7 @@ func kill() error{
 	if cmd != nil && cmd.Process != nil {
 		d("kill  %d",cmd.Process.Pid)
 		if err := cmd.Process.Kill();err != nil {
-			d("kill fail %s",err)
+			<- runningChan
 			return err
 		}
 		<- runningChan
