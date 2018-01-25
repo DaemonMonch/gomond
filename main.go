@@ -2,8 +2,7 @@ package main
 
 import (
 	"os/signal"
-	"syscall"
-	"time"
+	 "time"
 	"context"
 	"os/exec"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"os"
 	"sync/atomic"
 
-	//"os/exec"
 )
 
 var includeFileExts = flag.String("i","","include")
@@ -63,7 +61,6 @@ func main() {
 			}
 		}
 	}()
-
 	
 
 	watchSourceFiles(watcher,wd)
@@ -77,20 +74,7 @@ func main() {
 	<- restartChan	
 }
 
-func doRestart(cmd ...string) (*exec.Cmd,error) {
-	cm := exec.Command("go",cmd...)
-	d("restart ")
-	cm.Stdout = os.Stdout
-	cm.Stdin = os.Stdin
-	cm.Stderr = os.Stderr
-	cm.SysProcAttr = &syscall.SysProcAttr{Setpgid:true}
-	err := cm.Start()
-	if err != nil {
-		d("restart fail! %s",err)
-		return nil,err
-	}
-	return cm,nil	
-}
+
 
 func startRestartWatchDog(restart chan interface{},ctx context.Context){
 	go func() {
@@ -98,7 +82,7 @@ func startRestartWatchDog(restart chan interface{},ctx context.Context){
 		for {
 			select{
 				case <-restart:
-					killProcess(cmd)
+					 killProcess(cmd)
 					c,err := doRestart(ctx.Value("cmd").([]string)...)
 					if err == nil {
 						d("running pid %d",c.Process.Pid)
@@ -107,30 +91,19 @@ func startRestartWatchDog(restart chan interface{},ctx context.Context){
 						cmd = nil
 					}
 					<- time.After(5 * time.Second)
-					restarting.Store(false)
+					restarting.Store(false) 
 				case <-ctx.Done():
-					d("watchdog exit")
+					 d("watchdog exit")
 					killProcess(cmd)
 					close(restart)
-					return
+					return 
 			}
 
 		}
 	}()
 }
 
-func killProcess(cmd *exec.Cmd){
-	if cmd != nil {
-		pgid,err := syscall.Getpgid(cmd.Process.Pid)
-		if err != nil {
-			d("Get pgid err %s",err)
-		}
-		if err = syscall.Kill(-pgid,syscall.SIGKILL);err != nil{
-			d("kill err %s" ,err)
-		}
-		<- time.After(2 * time.Second)
-	}
-}
+
 
 func watchSourceFiles(watcher *fsnotify.Watcher,root string){
 	filepath.Walk(root,func(path string, info os.FileInfo, err error) error{
