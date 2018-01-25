@@ -39,6 +39,8 @@ func main() {
 	done := make(chan os.Signal, 1)
 	buildingChan := make(chan interface{})
 
+
+	autoload(genBuildName(pkgName))
 	startRestartWatchDog(buildingChan,context.WithValue(ctx,"name",pkgName))
 	// Process events
 	go func() {
@@ -60,7 +62,7 @@ func main() {
 		}
 	}()
 
-	watcher.Add(wd)
+	//watcher.Add(wd)
 	watchSourceFiles(watcher, wd)
 
 	signal.Notify(done, os.Interrupt, os.Kill)
@@ -75,7 +77,7 @@ func main() {
 func startRestartWatchDog(restart chan interface{}, ctx context.Context) {
 	go func() {
 		buildName := ctx.Value("name").(string)
-		autoload(genBuildName(buildName))
+		
 		for {
 			select {
 			case <-restart:
@@ -149,7 +151,7 @@ func start(buildName string) error{
 
 func kill() error{
 	if cmd != nil && cmd.Process != nil {
-		d("kill  %s",cmd.Process.Pid)
+		d("kill  %d",cmd.Process.Pid)
 		if err := cmd.Process.Kill();err != nil {
 			d("kill fail %s",err)
 			return err
