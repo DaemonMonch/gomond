@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"strings"
 	"runtime"
 	"context"
@@ -14,10 +15,15 @@ import (
 	"sync/atomic"
 )
 
-var includeFileExts = flag.String("i", "", "include")
-var buildRestarting atomic.Value
-var cmd *exec.Cmd
-var runningChan = make(chan interface{},1)
+var (
+	includeFileExts = flag.String("i", "", "include")
+	buildRestarting atomic.Value
+	cmd *exec.Cmd
+	l sync.Mutex
+	done = make(chan os.Signal, 1)
+	buildingChan = make(chan interface{})
+)
+
 
 func main() {
 	flag.Parse()
@@ -27,7 +33,8 @@ func main() {
 		panic(err)
 	}
 	pkgName := filepath.Base(wd)
-
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	
 	buildRestarting.Store(false)
 
 	watcher, err := fsnotify.NewWatcher()
@@ -35,54 +42,68 @@ func main() {
 		panic(err)
 	}
 
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	done := make(chan os.Signal, 1)
-	buildingChan := make(chan interface{})
-
-
-	autoload(genBuildName(pkgName))
+	watchEventLoop(watcher,ctx)
+	buildAndRestart(genBuildName(pkgName))
 	startRestartWatchDog(buildingChan,context.WithValue(ctx,"name",pkgName))
-	// Process events
+	
+	//watchSourceFiles(watcher, wd)
+	watcher.Add(wd)
+	wait()
+	
+	watcher.Close()
+	cancelFunc()
+	<- buildingChan
+}
+
+func wait(){ 
+	signal.Notify(done, os.Interrupt, os.Kill)
+	<-done
+	d("signal revieve ")
+}
+
+func watchEventLoop(watcher *fsnotify.Watcher,ctx context.Context){
 	go func() {
 		//filters := strings.Split(*includeFileExts, ",")
 		//filters = append(filters, "go")
 		for {
 			select {
 			case ev := <-watcher.Events:
-				onrestarting := buildRestarting.Load().(bool)
-				if(!onrestarting){
-					d("event: %v", ev)
-					buildRestarting.Store(true)
-					buildingChan <- 1
-				}
 
+				if !isReloadEvent(ev){
+					continue
+				}
+				
+				if !isSourceFile(ev.Name){
+					continue
+				}
+				d("event: %v", ev)
+				buildingChan <- 1
 			case <-watcher.Errors:
 				//d("error: %v", err)
+			case <-ctx.Done():
+				d("event loop exit")
+				return;
 			}
 		}
 	}()
+}
 
-	//watcher.Add(wd)
-	watchSourceFiles(watcher, wd)
+func isReloadEvent(evt fsnotify.Event) bool{
+	return evt.Op == fsnotify.Write
+}
 
-	signal.Notify(done, os.Interrupt, os.Kill)
-	<-done
-	d("signal revieve ")
-	/* ... do stuff ... */
-	watcher.Close()
-	cancelFunc()
-	<- buildingChan
+func isSourceFile(f string) bool {
+	return filepath.Ext(f) == ".go"
 }
 
 func startRestartWatchDog(restart chan interface{}, ctx context.Context) {
 	go func() {
 		buildName := ctx.Value("name").(string)
-		
 		for {
 			select {
 			case <-restart:
-				autoload(genBuildName(buildName))
-				buildRestarting.Store(false)
+				
+				buildAndRestart(genBuildName(buildName))
 			case <-ctx.Done():
 				d("watchdog exit")
 				kill()
@@ -94,7 +115,8 @@ func startRestartWatchDog(restart chan interface{}, ctx context.Context) {
 	}()
 }
 
-func autoload(buildName string) {
+
+func buildAndRestart(buildName string) {
 	err := build(buildName)
 	if err != nil {
 		d("build err %s wait for next change",err)
@@ -102,7 +124,7 @@ func autoload(buildName string) {
 	}
 	err = kill()
 	if err != nil {
-		d("kill err %s wait for next change",err)
+		d("kill err %s",err)
 		return
 	}
 	err = start(buildName)
@@ -110,18 +132,6 @@ func autoload(buildName string) {
 		d("start err %s wait for next change",err)
 		return
 	}
-}
-
-func restart(buildName string) error {
-	err := kill()
-	if err != nil {
-		return err
-	}
-	err = start(buildName)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func genBuildName(name string) string {
@@ -143,21 +153,23 @@ func start(buildName string) error{
 		d("start pid %d",cmd.Process.Pid)
 	}
 	go func(){
+		l.Lock()
+		defer l.Unlock()
 		cmd.Wait()
-		runningChan <- 1
 		cmd = nil
 	}()
 	return err	
 }
 
 func kill() error{
+	l.Lock()
+	defer l.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		d("kill  %d",cmd.Process.Pid)
 		if err := cmd.Process.Kill();err != nil {
-			<- runningChan
 			return err
 		}
-		<- runningChan
+		
 	}
 	return nil
 	
@@ -196,5 +208,5 @@ func watchSourceFiles(watcher *fsnotify.Watcher, root string) {
 }
 
 func d(s string, i ...interface{}) {
-	fmt.Printf("[DEBUG]\t"+s+"\n", i)
+	fmt.Printf("[gomon]\t"+s+"\n", i)
 }
