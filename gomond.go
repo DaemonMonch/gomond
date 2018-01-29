@@ -12,16 +12,14 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sync/atomic"
 )
 
 var (
 	includeFileExts = flag.String("i", "", "include")
-	buildRestarting atomic.Value
 	cmd *exec.Cmd
 	l sync.Mutex
 	done = make(chan os.Signal, 1)
-	buildingChan = make(chan interface{})
+	stopChan = make(chan struct{})
 )
 
 
@@ -35,24 +33,25 @@ func main() {
 	pkgName := filepath.Base(wd)
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	
-	buildRestarting.Store(false)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		panic(err)
 	}
 
-	watchEventLoop(watcher,ctx)
-	buildAndRestart(genBuildName(pkgName))
-	startRestartWatchDog(buildingChan,context.WithValue(ctx,"name",pkgName))
-	
+	buildName := genBuildName(pkgName)
+
+	watchEventLoop(watcher,ctx,buildName)
 	//watchSourceFiles(watcher, wd)
+	buildAndRestart(buildName)
+	
+	//
 	watcher.Add(wd)
 	wait()
 	
 	watcher.Close()
 	cancelFunc()
-	<- buildingChan
+	<- stopChan
 }
 
 func wait(){ 
@@ -61,13 +60,18 @@ func wait(){
 	d("signal revieve ")
 }
 
-func watchEventLoop(watcher *fsnotify.Watcher,ctx context.Context){
+func watchEventLoop(watcher *fsnotify.Watcher,ctx context.Context,buildName string){
 	go func() {
-		//filters := strings.Split(*includeFileExts, ",")
-		//filters = append(filters, "go")
+		var lastChangedFile string
 		for {
 			select {
 			case ev := <-watcher.Events:
+
+				if lastChangedFile == ev.Name {
+					continue
+				}
+
+				lastChangedFile = ev.Name
 
 				if !isReloadEvent(ev){
 					continue
@@ -77,11 +81,14 @@ func watchEventLoop(watcher *fsnotify.Watcher,ctx context.Context){
 					continue
 				}
 				d("event: %v", ev)
-				buildingChan <- 1
+				buildAndRestart(buildName)
 			case <-watcher.Errors:
 				//d("error: %v", err)
 			case <-ctx.Done():
 				d("event loop exit")
+				kill()
+				d("killed process")
+				close(stopChan)
 				return;
 			}
 		}
@@ -94,25 +101,6 @@ func isReloadEvent(evt fsnotify.Event) bool{
 
 func isSourceFile(f string) bool {
 	return filepath.Ext(f) == ".go"
-}
-
-func startRestartWatchDog(restart chan interface{}, ctx context.Context) {
-	go func() {
-		buildName := ctx.Value("name").(string)
-		for {
-			select {
-			case <-restart:
-				
-				buildAndRestart(genBuildName(buildName))
-			case <-ctx.Done():
-				d("watchdog exit")
-				kill()
-				close(restart)
-				return
-			}
-
-		}
-	}()
 }
 
 
@@ -162,14 +150,14 @@ func start(buildName string) error{
 }
 
 func kill() error{
-	l.Lock()
-	defer l.Unlock()
+	
 	if cmd != nil && cmd.Process != nil {
 		d("kill  %d",cmd.Process.Pid)
 		if err := cmd.Process.Kill();err != nil {
 			return err
 		}
-		
+		l.Lock()
+		defer l.Unlock()
 	}
 	return nil
 	
@@ -189,6 +177,10 @@ func build(buildName string) error{
 }
 
 func watchSourceFiles(watcher *fsnotify.Watcher, root string) {
+	err := watcher.Add(root)
+	if err != nil {
+		panic(err)
+	}
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			d("error occur on dir %s cause %s", path, err)
@@ -196,12 +188,13 @@ func watchSourceFiles(watcher *fsnotify.Watcher, root string) {
 		}
 
 		if !info.IsDir() && filepath.Ext(path) == ".go" {
-
-			d("watching %s", path)
-			err := watcher.Add(path)
+			dir := filepath.Dir(path)	
+			d("watching %s", dir)
+			err := watcher.Add(dir)
 			if err != nil {
 				return err
 			}
+			return filepath.SkipDir
 		}
 		return nil
 	})
